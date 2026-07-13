@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>L'Addition · Live balances</title>
+<meta name="theme-color" content="#152238">
+<style>
+:root{ --ink:#152238; --ink-soft:#3d4a63; --paper:#F5F3EC; --card:#fff; --line:#e4e0d4;
+  --blue:#2C5FBF; --blue-soft:#E9EFFA; --red:#C4453C; --green:#2E7D5B; --gold:#9A7B23;
+  --serif: ui-serif,"New York",Georgia,serif; --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);padding-bottom:40px;}
+h1,h2,.money,.big{font-family:var(--serif);letter-spacing:-0.01em;}
+header{position:sticky;top:0;z-index:10;background:var(--ink);color:#fff;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;}
+header .row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+header h1{margin:0;font-size:20px;font-weight:600;} header h1 em{font-style:italic;font-weight:400;}
+header .sub{font-size:12px;opacity:.75;margin-top:2px;}
+#refresh{border:none;background:rgba(255,255,255,.14);color:#fff;border-radius:999px;padding:8px 14px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;}
+#refresh .ico{display:inline-block;transition:transform .5s;}
+#refresh.spin .ico{transform:rotate(360deg);}
+.tricolore{height:3px;background:linear-gradient(90deg,#2C5FBF 0 33.4%,#F5F3EC 33.4% 66.7%,#C4453C 66.7% 100%);}
+main{max-width:640px;margin:0 auto;padding:14px;}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px;}
+.muted{color:var(--ink-soft);font-size:13px;} .small{font-size:12px;}
+.spread{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.big{font-size:28px;font-weight:600;}
+h2{font-size:16px;margin:18px 4px 8px;}
+.unit-card{border-left:5px solid var(--u,#888);cursor:pointer;}
+.bar-wrap{background:#EFECE2;border-radius:6px;height:8px;overflow:hidden;margin-top:8px;}
+.bar{height:100%;background:var(--u,var(--blue));}
+.detail{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px;font-size:13px;}
+.detail .li{display:flex;justify-content:space-between;padding:4px 0;}
+.detail .note{font-size:11.5px;color:var(--ink-soft);font-style:italic;padding:0 0 4px 12px;}
+.person-line{display:flex;justify-content:space-between;padding:9px 2px;border-bottom:1px solid var(--line);font-size:14px;cursor:pointer;}
+.person-line:last-child{border:none;}
+.pip{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;}
+.settle-row{display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line);font-size:14px;}
+.settle-row:last-child{border:none;} .settle-row .arrow{color:var(--gold);font-weight:700;}
+.money{font-weight:600;}
+.center{text-align:center;padding:60px 20px;color:var(--ink-soft);}
+.err{background:#FBEBEA;color:var(--red);border-radius:12px;padding:14px;font-size:14px;}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.16);}
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <div><h1>L'<em>Addition</em></h1><div class="sub" id="sub">Live balances · read-only</div></div>
+    <button id="refresh" onclick="refresh()"><span class="ico">↻</span><span id="updEl">Refresh</span></button>
+  </div>
+</header>
+<div class="tricolore"></div>
+<main id="main"><div class="center">Loading balances…</div></main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+"use strict";
+/* ---- shared calculation engine (read-only copy of the main app's) ---- */
+const UNIT_COLORS=['#2C5FBF','#B0532F','#2E7D74','#7A4E8C','#9A7B23','#B04A6E','#4A6076','#6B7A2E'];
+let state=null, weekId=null, docRef=null, openUnit=null, openPerson=null;
+const CUR=()=> (state&&state.currency)||'€';
+function CENT(v){ const n=parseFloat(String(v??'').replace(',','.')); return isFinite(n)?Math.round(n*100):0; }
+function money(c){ return (c<0?'−':'')+CUR()+(Math.abs(c)/100).toFixed(2); }
+function person(pid){ return state.people.find(p=>p.id===pid); }
+function pname(pid){ const p=person(pid); return p?p.name:'?'; }
+function esc(s){ return String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+function fmtDate(iso){ if(!iso)return''; return new Date(iso+'T12:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'}); }
+function splitCents(t,n){ if(n<=0)return[]; const s=t<0?-1:1; t=Math.abs(t); const b=Math.floor(t/n),a=Array(n).fill(b); let r=t-b*n; for(let i=0;i<r;i++)a[i]++; return a.map(x=>x*s); }
+function allUnits(){ const units=[],used=new Set();
+  state.couples.forEach(c=>{units.push({id:'c:'+c.id,members:[...c.members]});c.members.forEach(m=>used.add(m));});
+  state.people.forEach(p=>{if(!used.has(p.id))units.push({id:'p:'+p.id,members:[p.id]});});
+  units.forEach((u,i)=>{u.color=UNIT_COLORS[i%UNIT_COLORS.length];u.label=u.members.map(pname).join(' & ');});
+  return units; }
+function presentUnits(parts){ const s=new Set(parts);
+  return allUnits().map(u=>({...u,members:u.members.filter(m=>s.has(m))})).filter(u=>u.members.length); }
+function unitColor(pid){ const u=allUnits().find(u=>u.members.includes(pid)); return u?u.color:'#888'; }
+function unitById(uidStr,parts){ return presentUnits(parts).find(x=>x.id===uidStr)||null; }
+function expenseShares(exp){
+  const parts=(exp.participants||[]).filter(pid=>person(pid));
+  const shares={}; parts.forEach(p=>shares[p]=0);
+  const total=CENT(exp.total);
+  const addTo=(pids,a)=>{ if(!pids.length)return; splitCents(a,pids.length).forEach((c,i)=>shares[pids[i]]+=c); };
+  const units=presentUnits(parts);
+  const perUnit=a=>{ splitCents(a,units.length).forEach((c,i)=>addTo(units[i].members,c)); };
+  if(!parts.length) return {shares,total};
+  if(exp.mode==='person') addTo(parts,total);
+  else if(exp.mode==='couple') perUnit(total);
+  else if(exp.mode==='itemized'){
+    let assigned=0;
+    (exp.items||[]).forEach(it=>{ const pc=CENT(it.price); if(!pc)return;
+      const asn=(it.assign||[]).map(u=>unitById(u,parts)).filter(Boolean);
+      if(asn.length){ assigned+=pc; splitCents(pc,asn.length).forEach((c,i)=>addTo(asn[i].members,c)); } });
+    const rem=total-assigned;
+    if(rem>0){ if(exp.remainderMode==='person')addTo(parts,rem);
+      else if(exp.remainderMode==='couple')perUnit(rem);
+      else if(exp.remainderMode==='prop'){ const cur=parts.map(p=>shares[p]),s=cur.reduce((a,b)=>a+b,0);
+        if(s>0){let acc=0;parts.forEach((p,i)=>{const add=Math.round(rem*cur[i]/s);shares[p]+=add;acc+=add;});shares[parts[0]]+=rem-acc;}
+        else addTo(parts,rem); } }
+  }
+  else if(exp.mode==='custom'){ parts.forEach(p=>shares[p]=CENT((exp.custom||{})[p])); }
+  else if(exp.mode==='pct'){ let sum=0; const raw=parts.map(p=>{const v=parseFloat((exp.pct||{})[p])||0;sum+=v;return v;});
+    let acc=0; parts.forEach((p,i)=>{const c=Math.round(total*raw[i]/100);shares[p]=c;acc+=c;});
+    if(Math.abs(sum-100)<=0.01&&acc!==total){let big=parts[0];parts.forEach(p=>{if(shares[p]>shares[big])big=p;});shares[big]+=total-acc;} }
+  return {shares,total};
+}
+function computeBalances(){
+  const exps=state.expenses.filter(e=>!weekId||e.weekId===weekId);
+  const per={}; state.people.forEach(p=>per[p.id]={owes:0,paid:0,lines:[]});
+  let trip=0;
+  exps.forEach(e=>{ const {shares,total}=expenseShares(e); trip+=total;
+    if(per[e.payerId])per[e.payerId].paid+=total;
+    Object.entries(shares).forEach(([pid,c])=>{ if(per[pid]&&c){per[pid].owes+=c; per[pid].lines.push({exp:e,share:c});} }); });
+  state.people.forEach(p=>per[p.id].net=per[p.id].paid-per[p.id].owes);
+  return {per,trip,count:exps.length};
+}
+function settleUp(per){
+  const units=allUnits().map(u=>({...u,net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0)}));
+  const debt=units.filter(u=>u.net<0).map(u=>({...u,amt:-u.net})).sort((a,b)=>b.amt-a.amt);
+  const cred=units.filter(u=>u.net>0).map(u=>({...u,amt:u.net})).sort((a,b)=>b.amt-a.amt);
+  const out=[]; let i=0,j=0;
+  while(i<debt.length&&j<cred.length){ const x=Math.min(debt[i].amt,cred[j].amt);
+    if(x>0)out.push({from:debt[i].label,to:cred[j].label,amt:x,color:debt[i].color});
+    debt[i].amt-=x;cred[j].amt-=x; if(debt[i].amt<=0)i++; if(cred[j].amt<=0)j++; }
+  return out;
+}
+
+/* ---- dashboard ---- */
+function unitLines(u,per){
+  const out=[];
+  [...state.expenses].filter(e=>!weekId||e.weekId===weekId)
+    .sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(e=>{
+      const {shares}=expenseShares(e);
+      const c=u.members.reduce((s,m)=>s+(shares[m]||0),0);
+      if(c>0) out.push({e,c});
+    });
+  return out;
+}
+function render(){
+  if(!state){ return; }
+  const w=weekId?state.weeks.find(x=>x.id===weekId):null;
+  document.getElementById('sub').textContent=(w?w.name:'Whole trip')+' · live balances · read-only';
+  const {per,trip,count}=computeBalances();
+  const payer=pname(state.defaultPayer);
+  const units=allUnits().map(u=>({...u,share:u.members.reduce((s,m)=>s+per[m].owes,0)})).filter(u=>u.share>0);
+  const maxShare=Math.max(1,...units.map(u=>u.share));
+  let h='<div class="card spread"><div><div class="muted small">'+(w?esc(w.name):'Whole trip')+' · '+count+' expenses · all paid by '+esc(payer)+'</div>'
+    +'<div class="big">'+money(trip)+'</div></div></div>';
+
+  h+='<h2>What each couple owes <span class="muted small">(tap for the breakdown)</span></h2>';
+  units.forEach(u=>{
+    h+='<div class="card unit-card" style="--u:'+u.color+'" onclick="openUnit=openUnit===\''+u.id+'\'?null:\''+u.id+'\';render()">'
+      +'<div class="spread"><b>'+esc(u.label)+'</b><span class="money">'+money(u.share)+'</span></div>'
+      +'<div class="bar-wrap"><div class="bar" style="width:'+Math.round(u.share/maxShare*100)+'%"></div></div>';
+    if(openUnit===u.id){
+      h+='<div class="detail">'+unitLines(u,per).map(l=>
+        '<div class="li"><span>'+esc(l.e.vendor)+' <span class="muted">'+fmtDate(l.e.date)+'</span></span><span>'+money(l.c)+'</span></div>'
+        +(l.e.notes&&l.e.notes.trim()?'<div class="note">'+esc(l.e.notes.trim())+'</div>':'')).join('')
+        +'<div class="li" style="border-top:1px solid var(--line);margin-top:4px;padding-top:6px;"><b>Total</b><b>'+money(u.share)+'</b></div></div>';
+    }
+    h+='</div>';
+  });
+
+  h+='<h2>By person</h2><div class="card">';
+  state.people.forEach(p=>{ const b=per[p.id]; if(!b.owes)return;
+    h+='<div class="person-line" onclick="openPerson=openPerson===\''+p.id+'\'?null:\''+p.id+'\';render()">'
+      +'<span><span class="pip" style="background:'+unitColor(p.id)+'"></span>'+esc(p.name)+'</span><span class="money">'+money(b.owes)+'</span></div>';
+    if(openPerson===p.id){ h+='<div class="detail" style="border-top:none;">'+b.lines.map(l=>
+      '<div class="li"><span>'+esc(l.exp.vendor)+' <span class="muted">'+fmtDate(l.exp.date)+'</span></span><span>'+money(l.share)+'</span></div>'
+      +(l.exp.notes&&l.exp.notes.trim()?'<div class="note">'+esc(l.exp.notes.trim())+'</div>':'')).join('')+'</div>'; }
+  });
+  h+='</div>';
+
+  const transfers=settleUp(per);
+  h+='<h2>Settle up</h2><div class="card">'+(transfers.length?transfers.map(t=>
+    '<div class="settle-row"><span class="pip" style="background:'+t.color+'"></span><b>'+esc(t.from)+'</b><span class="arrow">→</span><b>'+esc(t.to)+'</b><span style="margin-left:auto;" class="money">'+money(t.amt)+'</span></div>').join('')
+    :'<p class="muted" style="margin:4px;">All square 🥂</p>')+'</div>'
+    +'<p class="muted small" style="text-align:center;">Updates live as '+esc(payer)+' adds expenses — or tap Refresh.</p>';
+  document.getElementById('main').innerHTML=h;
+}
+function stampUpd(){ document.getElementById('updEl').textContent='Updated '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}); }
+function apply(snap){
+  const d=snap.data();
+  if(!d||!d.json){ document.getElementById('main').innerHTML='<div class="err">Nothing here yet — this trip has no synced data.</div>'; return; }
+  try{ const s=JSON.parse(d.json); if(s&&Array.isArray(s.people)){ state=s; render(); stampUpd(); } }catch(e){}
+}
+async function refresh(){
+  const b=document.getElementById('refresh'); b.classList.add('spin');
+  try{ if(docRef){ const snap=await docRef.get(); apply(snap); } }catch(e){}
+  setTimeout(()=>b.classList.remove('spin'),500);
+}
+(function init(){
+  let payload=null;
+  try{ payload=JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1))))); }catch(e){}
+  if(!payload||!payload.c||!payload.t){
+    document.getElementById('main').innerHTML='<div class="err">This link is missing its trip details. Ask for a fresh share link from the app (Export → Live share link).</div>';
+    return;
+  }
+  weekId=payload.w||null;
+  try{
+    firebase.initializeApp(payload.c);
+    docRef=firebase.firestore().collection('trips').doc(payload.t);
+    docRef.onSnapshot(apply, ()=>{ document.getElementById('main').innerHTML='<div class="err">Couldn\'t reach the trip data. Check your connection and tap Refresh.</div>'; });
+  }catch(e){
+    document.getElementById('main').innerHTML='<div class="err">Couldn\'t connect to the database with this link.</div>';
+  }
+})();
+</script>
+</body>
+</html>

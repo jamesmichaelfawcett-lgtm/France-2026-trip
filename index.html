@@ -174,6 +174,11 @@ input[type=range]{width:100%; accent-color:var(--blue); margin:8px 0 0; padding:
 
   <section id="view-export" class="view">
     <div class="card">
+      <h2>Live share link</h2>
+      <p class="muted">A read-only dashboard your friends can bookmark — live totals, tappable couple breakdowns, and a refresh button. No editing, no app needed.</p>
+      <div id="shareBody"></div>
+    </div>
+    <div class="card">
       <h2>PDF statement</h2>
       <p class="muted">A polished breakdown: totals, couple summary, individual summary, who-owes-who, and a per-couple expense detail.</p>
       <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:14px;margin:8px 0 12px;">
@@ -385,6 +390,7 @@ function showView(name){
   if(name==='expenses') renderExpenses();
   if(name==='balances') renderBalances();
   if(name==='setup') renderSetup();
+  if(name==='export') renderShareCard();
   window.scrollTo(0,0);
 }
 
@@ -988,6 +994,39 @@ function disconnectSync(){
   fb.enabled=false; saveFb();
   if(unsubCloud){ unsubCloud(); unsubCloud=null; }
   db=null; setCloud('saved ✓'); toast('Sync off — data stays on this device'); renderSetup();
+}
+
+/* ============ Live share link ============ */
+let shareWeek='';
+function renderShareCard(){
+  const el=document.getElementById('shareBody'); if(!el) return;
+  if(!fb.enabled||!fb.config||!fb.tripId){
+    el.innerHTML='<p class="muted small" style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 12px;">Turn on <b>Cloud sync</b> in the Setup tab first — the live dashboard reads from your synced trip.</p>';
+    return;
+  }
+  const segs=[['','Whole trip'],...state.weeks.map(w=>[w.id,w.name])]
+    .map(([id,nm])=>'<button class="'+(shareWeek===id?'on':'')+'" onclick="shareWeek=\''+id+'\';renderShareCard()">'+esc(nm)+'</button>').join('');
+  el.innerHTML='<label>What the link shows</label><div class="seg">'+segs+'</div>'
+    +'<div style="display:flex;gap:8px;margin-top:12px;">'
+    +'<button class="btn secondary" style="flex:1" onclick="copyShareLink()">Copy link</button>'
+    +(navigator.share?'<button class="btn" style="flex:1" onclick="shareShareLink()">Share…</button>':'')
+    +'</div>'
+    +'<input id="shareUrl" readonly value="'+esc(makeShareLink())+'" style="margin-top:10px;font-size:11px;color:var(--ink-soft);" onclick="this.select()">'
+    +'<p class="muted small" style="margin-top:8px;">The dashboard is view-only, but the link contains your trip code — only send it to people on the trip.</p>';
+}
+function makeShareLink(){
+  const payload={c:fb.config, t:fb.tripId, w:shareWeek||''};
+  const b64=btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+  return new URL('share.html', location.href).href+'#'+b64;
+}
+async function copyShareLink(){
+  const url=makeShareLink();
+  try{ await navigator.clipboard.writeText(url); toast('Link copied'); }
+  catch(e){ const i=document.getElementById('shareUrl'); i.select(); document.execCommand('copy'); toast('Link copied'); }
+}
+function shareShareLink(){
+  const w=shareWeek?state.weeks.find(x=>x.id===shareWeek):null;
+  navigator.share({title:"L'Addition — live balances", text:'Live view of who owes what'+(w?' ('+w.name+')':'')+' 🇫🇷', url:makeShareLink()}).catch(()=>{});
 }
 
 /* ============ Init ============ */
