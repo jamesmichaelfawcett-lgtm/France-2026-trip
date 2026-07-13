@@ -1,0 +1,13 @@
+{
+  "name": "L'Addition — France 2026",
+  "short_name": "L'Addition",
+  "display": "standalone",
+  "start_url": "./index.html",
+  "scope": "./",
+  "background_color": "#F5F3EC",
+  "theme_color": "#152238",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
