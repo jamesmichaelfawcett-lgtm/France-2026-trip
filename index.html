@@ -125,6 +125,10 @@ nav button.fab{background:var(--ink); color:#fff; border-radius:50%; width:52px;
   margin-top:-24px; box-shadow:0 6px 16px rgba(21,34,56,.35); font-size:26px; justify-content:center;}
 
 .pill{font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; background:var(--blue-soft); color:var(--blue);}
+input[type=range]{width:100%; accent-color:var(--blue); margin:8px 0 0; padding:0; border:none; background:transparent; height:24px;}
+.alloc-banner{display:flex; justify-content:space-between; align-items:center; background:var(--blue-soft); border-radius:10px; padding:10px 12px; margin:8px 0 4px; font-size:14px; font-weight:600; color:var(--blue);}
+.alloc-banner.over{background:var(--red-soft); color:var(--red);}
+.alloc-banner.done{background:var(--green-soft); color:var(--green);}
 .pill.warn{background:var(--red-soft); color:var(--red);}
 .pill.ok{background:var(--green-soft); color:var(--green);}
 .preview-box{background:#FCFBF7; border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-top:12px;}
@@ -513,12 +517,22 @@ function renderModePanel(){
     return;
   }
   if(d.mode==='custom'){
-    el.innerHTML='<p class="muted" style="margin:10px 2px 6px;">Type exact amounts. Blanks can be auto-filled with whatever is left.</p>'
-      +'<div id="customRows">'+d.participants.map(pid=>
-        '<div class="spread" style="margin:6px 0;"><span style="font-size:14px;"><span class="pip" style="display:inline-block;background:'+unitColor(pid)+';margin-right:6px;"></span>'+esc(pname(pid))+'</span>'
-        +'<input style="width:110px;text-align:right;" inputmode="decimal" placeholder="—" value="'+esc(d.custom[pid]||'')+'" oninput="draft.custom[\''+pid+'\']=this.value;updatePreview()"></div>').join('')+'</div>'
-      +'<div style="display:flex;gap:8px;margin-top:8px;"><button class="btn secondary slim" onclick="autoFill(\'person\')">Auto-fill rest per person</button>'
-      +'<button class="btn secondary slim" onclick="autoFill(\'couple\')">Auto-fill rest per couple</button></div>';
+    const totalE=(CENT(d.total)/100)||100;
+    el.innerHTML='<p class="muted" style="margin:10px 2px 6px;">Slide roughly, or type exact amounts. Blanks can be auto-filled with whatever is left.</p>'
+      +'<div class="alloc-banner" id="allocBanner"><span>Left to allocate</span><b id="allocLeft">—</b></div>'
+      +d.participants.map(pid=>{
+        const v=d.custom[pid]||'';
+        return '<div data-cust="'+pid+'" style="margin:10px 0 14px;">'
+          +'<div class="spread"><span style="font-size:14px;"><span class="pip" style="display:inline-block;background:'+unitColor(pid)+';margin-right:6px;"></span>'+esc(pname(pid))+'</span>'
+          +'<input class="amt" style="width:110px;text-align:right;" inputmode="decimal" placeholder="—" value="'+esc(v)+'" oninput="custInput(\''+pid+'\',this.value,\'num\')"></div>'
+          +'<input type="range" class="cust-range" min="0" max="'+totalE+'" step="0.5" value="'+(parseFloat(v)||0)+'" oninput="custInput(\''+pid+'\',this.value,\'rng\')">'
+          +'</div>';
+      }).join('')
+      +'<div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;">'
+      +'<button class="btn secondary slim" onclick="autoFill(\'person\')">Auto-fill rest per person</button>'
+      +'<button class="btn secondary slim" onclick="autoFill(\'couple\')">Auto-fill rest per couple</button>'
+      +'<button class="btn ghost-btn slim" onclick="resetCustom()">↺ Reset</button></div>';
+    updateAlloc();
     return;
   }
   if(d.mode==='pct'){
@@ -613,6 +627,26 @@ function bindUnitChips(){
   });
 }
 
+function custInput(pid,v,from){
+  const row=document.querySelector('[data-cust="'+pid+'"]');
+  if(from==='rng'){ v=(Math.round(parseFloat(v)*100)/100).toFixed(2); if(row) row.querySelector('input.amt').value=v; }
+  else if(row){ row.querySelector('.cust-range').value=parseFloat(v)||0; }
+  draft.custom[pid]=v;
+  updatePreview();
+}
+function resetCustom(){ draft.custom={}; renderModePanel(); updatePreview(); toast('Custom split cleared'); }
+function updateAlloc(){
+  const b=document.getElementById('allocBanner'); if(!b||!draft) return;
+  const total=CENT(draft.total);
+  const used=draft.participants.reduce((s,p)=>s+CENT(draft.custom[p]),0);
+  const left=total-used;
+  document.getElementById('allocLeft').textContent = left<0 ? money(-left)+' over' : money(left);
+  b.classList.toggle('over',left<0);
+  b.classList.toggle('done',left===0&&total>0);
+  const max=(total/100)||100;
+  document.querySelectorAll('.cust-range').forEach(r=>{ if(parseFloat(r.max)!==max) r.max=max; });
+}
+
 function updatePreview(){
   if(!draft) return;
   // if itemised and no total entered, offer items sum as the total
@@ -627,6 +661,7 @@ function updatePreview(){
   const rem=document.getElementById('remInfo');
   if(rem){ const assigned=(draft.items||[]).reduce((s,i)=>s+((i.assign||[]).length?CENT(i.price):0),0);
     rem.textContent='Items assigned: '+money(assigned)+' · Leftover: '+money(Math.max(0,total-assigned)); }
+  if(draft.mode==='custom') updateAlloc();
 }
 
 function saveExpense(){
@@ -735,11 +770,12 @@ function exportPDF(){
   if(!window.jspdf||!window.jspdf.jsPDF){ toast('PDF library needs internet — use Print view instead'); return; }
   const {jsPDF}=window.jspdf;
   const doc=new jsPDF();
-  const M=(c)=>CUR().replace('€','EUR ').replace('£','GBP ')+(c/100).toFixed(2);
   const EUR=(c)=> (CUR()==='€'?'EUR ':CUR())+(c/100).toFixed(2);
   const navy=[21,34,56], blue=[44,95,191], red=[196,69,60];
+  const noteStyle={fontSize:7.5, textColor:[130,130,130], fontStyle:'italic', cellPadding:{left:9, top:0.5, bottom:1.5}, fillColor:[255,255,255]};
   const {per,trip}=computeBalances(null);
   const units=allUnits();
+  const payer=pname(state.defaultPayer);
 
   doc.setFont('times','bold'); doc.setFontSize(26); doc.setTextColor(...navy);
   doc.text("L'Addition", 14, 22);
@@ -748,44 +784,57 @@ function exportPDF(){
   doc.setDrawColor(...blue); doc.setLineWidth(1.2); doc.line(14,33,80,33);
   doc.setDrawColor(...red); doc.line(80,33,146,33);
   doc.setFontSize(13); doc.setTextColor(...navy); doc.setFont('helvetica','bold');
-  doc.text('Trip total: '+EUR(trip)+'   ·   Paid by '+pname(state.defaultPayer), 14, 43);
+  doc.text('Trip total: '+EUR(trip), 14, 43);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
+  doc.text('Everything was paid by '+payer+'. Shares below show what each person or couple owes against that total,', 14, 49);
+  doc.text('including '+payer+"'s own share — the whole table adds up to the grand balance.", 14, 53.5);
 
-  // Couple summary
-  doc.autoTable({ startY:50, head:[['Couple / traveller','Members','Share of trip','Owes '+pname(state.defaultPayer)]],
+  // Owed by couple
+  doc.autoTable({ startY:58, head:[['Couple / traveller','Members','Owes']],
     body: units.map(u=>{ const share=u.members.reduce((s,m)=>s+per[m].owes,0);
-      const net=u.members.reduce((s,m)=>s+per[m].net,0);
-      return [u.label, u.members.map(pname).join(', '), EUR(share), net<0?EUR(-net):(net>0?'is owed '+EUR(net):'—')]; }),
+      return [u.label, u.members.map(pname).join(', '), EUR(share)]; }),
+    foot:[['','Grand balance ('+payer+')', EUR(trip)]],
+    footStyles:{fillColor:[240,238,228], textColor:navy, fontStyle:'bold'},
     headStyles:{fillColor:navy}, styles:{fontSize:9}, theme:'striped' });
 
-  // Person summary
-  doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Person','Paid','Individual share','Net']],
-    body: state.people.map(p=>{ const b=per[p.id];
-      return [p.name, EUR(b.paid), EUR(b.owes), (b.net>=0?'+':'-')+EUR(Math.abs(b.net)).replace(/^/,'')]; }),
+  // Owed by person
+  doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Person','Individual share']],
+    body: state.people.map(p=>[p.name, EUR(per[p.id].owes)]),
+    foot:[['Total', EUR(trip)]],
+    footStyles:{fillColor:[240,238,228], textColor:navy, fontStyle:'bold'},
     headStyles:{fillColor:blue}, styles:{fontSize:9}, theme:'striped' });
 
-  // Settle up
+  // Settle up (the background truth: transfers to the payer)
   const transfers=settleUp(per);
   if(transfers.length){
-    doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Who pays','To','Amount']],
+    doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Settle up — who pays','To','Amount']],
       body:transfers.map(t=>[t.from,t.to,EUR(t.amt)]), headStyles:{fillColor:red}, styles:{fontSize:9} });
   }
 
-  // Expense register
+  // Expense register (with notes as indented sub-rows)
   doc.addPage();
   doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(...navy); doc.text('All expenses',14,18);
+  const regBody=[];
+  [...state.expenses].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(e=>{
+    const w=state.weeks.find(x=>x.id===e.weekId);
+    regBody.push([fmtDate(e.date), e.vendor, w?w.name:'—', e.mode, EUR(CENT(e.total))]);
+    if(e.notes && e.notes.trim()) regBody.push([{content:e.notes.trim(), colSpan:5, styles:noteStyle}]);
+  });
   doc.autoTable({ startY:24, head:[['Date','Vendor','Week','Split','Total']],
-    body:[...state.expenses].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(e=>{
-      const w=state.weeks.find(x=>x.id===e.weekId);
-      return [fmtDate(e.date), e.vendor, w?w.name:'—', e.mode, EUR(CENT(e.total))]; }),
-    headStyles:{fillColor:navy}, styles:{fontSize:8.5}, theme:'grid' });
+    body:regBody, headStyles:{fillColor:navy}, styles:{fontSize:8.5}, theme:'grid' });
 
-  // Per-couple detail
+  // Per-couple detail (with notes under each line item)
   if(document.getElementById('pdfDetail').checked){
     units.forEach(u=>{
       const lines=[];
-      state.expenses.forEach(e=>{ const {shares}=expenseShares(e);
+      [...state.expenses].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(e=>{
+        const {shares}=expenseShares(e);
         const c=u.members.reduce((s,m)=>s+(shares[m]||0),0);
-        if(c>0) lines.push([fmtDate(e.date), e.vendor, EUR(c)]); });
+        if(c>0){
+          lines.push([fmtDate(e.date), e.vendor, EUR(c)]);
+          if(e.notes && e.notes.trim()) lines.push([{content:e.notes.trim(), colSpan:3, styles:noteStyle}]);
+        }
+      });
       if(!lines.length) return;
       const total=u.members.reduce((s,m)=>s+per[m].owes,0);
       doc.addPage();
@@ -793,7 +842,7 @@ function exportPDF(){
       doc.text(u.label+' — detail ('+EUR(total)+')',14,18);
       doc.autoTable({ startY:24, head:[['Date','Vendor','Their share']], body:lines,
         headStyles:{fillColor:blue}, styles:{fontSize:9}, theme:'striped',
-        foot:[['','Total',EUR(total)]], footStyles:{fillColor:[240,238,228],textColor:navy,fontStyle:'bold'} });
+        foot:[['','Total owed',EUR(total)]], footStyles:{fillColor:[240,238,228],textColor:navy,fontStyle:'bold'} });
     });
   }
   // page footer
