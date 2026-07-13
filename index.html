@@ -129,6 +129,15 @@ input[type=range]{width:100%; accent-color:var(--blue); margin:8px 0 0; padding:
 .alloc-banner{display:flex; justify-content:space-between; align-items:center; background:var(--blue-soft); border-radius:10px; padding:10px 12px; margin:8px 0 4px; font-size:14px; font-weight:600; color:var(--blue);}
 .alloc-banner.over{background:var(--red-soft); color:var(--red);}
 .alloc-banner.done{background:var(--green-soft); color:var(--green);}
+.overlay{position:fixed; inset:0; background:var(--paper); z-index:70; overflow-y:auto; padding:calc(16px + env(safe-area-inset-top)) 14px calc(var(--nav-h) + 16px);}
+.overlay .o-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; max-width:640px; margin-left:auto; margin-right:auto;}
+.overlay .o-head h2{margin:0; font-size:20px;}
+.overlay .card{max-width:640px; margin-left:auto; margin-right:auto;}
+.progress-wrap{background:#ECE9DF; border-radius:8px; height:10px; overflow:hidden; margin-top:10px;}
+.progress{height:100%; background:var(--blue); width:0%; transition:width .3s;}
+.scan-item{display:flex; gap:8px; align-items:center; margin-bottom:8px;}
+.scan-item input[type=checkbox]{width:22px; height:22px; flex:none; accent-color:var(--blue);}
+.scan-item .nm{flex:1;} .scan-item .pr{width:92px; text-align:right;}
 .pill.warn{background:var(--red-soft); color:var(--red);}
 .pill.ok{background:var(--green-soft); color:var(--green);}
 .preview-box{background:#FCFBF7; border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-top:12px;}
@@ -203,6 +212,8 @@ input[type=range]{width:100%; accent-color:var(--blue); margin:8px 0 0; padding:
 
   <section id="view-setup" class="view"><div id="setupBody"></div></section>
 </main>
+
+<div id="scanOverlay" class="overlay" style="display:none;"></div>
 
 <nav>
   <button data-view="expenses" class="on" onclick="showView('expenses')"><span class="ico">🧾</span>Expenses</button>
@@ -460,6 +471,8 @@ function renderEditor(){
    '<div class="card">'
    +'<div class="spread"><h2>'+(d._isNew?'New expense':'Edit expense')+'</h2>'
    +(d._isNew?'':'<button class="btn slim danger" onclick="deleteExpense()">Delete</button>')+'</div>'
+   +'<button class="btn secondary" onclick="document.getElementById(\'scanFile\').click()">📷 Scan a receipt</button>'
+   +'<input type="file" id="scanFile" accept="image/*" capture="environment" style="display:none;" onchange="handleScanFile(this)">'
    +'<label>Vendor / place</label><input id="f-vendor" value="'+esc(d.vendor)+'" placeholder="e.g. Café de la Plage" oninput="draft.vendor=this.value">'
    +'<div class="grid2"><div><label>Date</label><input type="date" id="f-date" value="'+esc(d.date)+'" oninput="draft.date=this.value"></div>'
    +'<div><label>Category</label><select onchange="draft.category=this.value">'+cats+'</select></div></div>'
@@ -994,6 +1007,123 @@ function disconnectSync(){
   fb.enabled=false; saveFb();
   if(unsubCloud){ unsubCloud(); unsubCloud=null; }
   db=null; setCloud('saved ✓'); toast('Sync off — data stays on this device'); renderSetup();
+}
+
+/* ============ Receipt scanning (on-device OCR) ============ */
+let scanResult=null, ocrWorker=null;
+function scanOverlay(html){ const o=document.getElementById('scanOverlay'); o.style.display=html?'block':'none'; if(html)o.innerHTML=html; window.scrollTo(0,0); }
+function closeScan(){ scanOverlay(null); }
+function scanProgressUI(msg,pct){
+  scanOverlay('<div class="o-head"><h2>📷 Reading receipt</h2><button class="btn slim ghost-btn" onclick="closeScan()">Cancel</button></div>'
+    +'<div class="card"><p class="muted" style="margin-top:0;">'+esc(msg)+'</p>'
+    +'<div class="progress-wrap"><div class="progress" style="width:'+Math.round(pct*100)+'%"></div></div>'
+    +'<p class="muted small" style="margin-top:10px;">Tip: lay the receipt flat, good light, fill the frame. The first ever scan downloads the OCR engine (~15&nbsp;MB) — after that it\'s fast and works offline.</p></div>');
+}
+function preprocessReceipt(file){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(file); const img=new Image();
+    img.onload=()=>{ URL.revokeObjectURL(url);
+      const maxDim=1800; let w=img.width,h=img.height;
+      const sc=Math.min(1,maxDim/Math.max(w,h)); w=Math.round(w*sc); h=Math.round(h*sc);
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      const x=c.getContext('2d'); x.drawImage(img,0,0,w,h);
+      const d=x.getImageData(0,0,w,h), p=d.data;
+      for(let i=0;i<p.length;i+=4){ let g=0.299*p[i]+0.587*p[i+1]+0.114*p[i+2];
+        g=(g-128)*1.35+140; g=g<0?0:g>255?255:g; p[i]=p[i+1]=p[i+2]=g; }
+      x.putImageData(d,0,0); res(c); };
+    img.onerror=()=>rej(new Error('could not open the photo')); img.src=url;
+  });
+}
+async function handleScanFile(input){
+  const file=input.files&&input.files[0]; input.value=''; if(!file) return;
+  scanProgressUI('Preparing photo…',0.03);
+  try{
+    const canvas=await preprocessReceipt(file);
+    if(!window.Tesseract){ scanProgressUI('Loading OCR engine (first time only)…',0.06);
+      await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'); }
+    if(!ocrWorker){
+      scanProgressUI('Loading English + French language models…',0.1);
+      ocrWorker=await Tesseract.createWorker('eng+fra',1,{logger:m=>{ if(m.status==='recognizing text') scanProgressUI('Reading receipt…',0.15+m.progress*0.85); }});
+      await ocrWorker.setParameters({tessedit_pageseg_mode:'4'});
+    }
+    scanProgressUI('Reading receipt…',0.15);
+    const {data}=await ocrWorker.recognize(canvas);
+    scanResult=parseReceipt(data.text||'');
+    renderScanReview();
+  }catch(e){
+    scanOverlay('<div class="o-head"><h2>📷 Scan receipt</h2><button class="btn slim ghost-btn" onclick="closeScan()">Close</button></div>'
+      +'<div class="card"><p class="muted" style="margin-top:0;">Couldn\'t read that photo'+(e&&e.message?' ('+esc(e.message)+')':'')+'. If this was your first scan, check you\'re online so the engine can download, then try again with more light.</p>'
+      +'<button class="btn" onclick="document.getElementById(\'scanFile\').click()">Try another photo</button></div>');
+  }
+}
+function parseReceipt(text){
+  const lines=text.split('\n').map(l=>l.replace(/\s{2,}/g,'  ').trim()).filter(Boolean);
+  const priceRe=/(?:€\s*)?(\d{1,4})\s*[.,]\s*(\d{2})(?!\d)\s*(?:€|EUR|E)?\s*$/i;
+  const skipRe=/(sous[\s-]?total|sub\s?total|\btva\b|t\.v\.a|\bvat\b|\bh\.?t\.?\b|carte|card|\bcb\b|visa|master|amex|contactless|sans contact|espece|cash|rendu|change|monnaie|remise|discount|solde|acompte|merci|thank|couvert|serveur|\btel\b|siret|\btps\b|\btva\s|pourboire|\btip\b|\bservice\b|arrondi)/i;
+  const totalRe=/(total|montant|[aà]\s?payer|somme\s?due|amount\s?due|net\s?[aà]\s?payer|\bdue\b)/i;
+  let items=[], total=null, vendor=''; const amounts=[];
+  lines.forEach((raw,idx)=>{
+    const m=raw.match(priceRe);
+    if(!m){
+      if(!vendor && idx<5 && /[A-Za-zÀ-ÿ]{3,}/.test(raw) && !/\d{2}[\/.:]\d{2}/.test(raw) && !totalRe.test(raw))
+        vendor=raw.replace(/[*#=_~]{2,}/g,'').replace(/\s{2,}/g,' ').trim();
+      return;
+    }
+    const cents=parseInt(m[1],10)*100+parseInt(m[2],10);
+    let name=raw.slice(0,m.index).replace(/[.·•*_\-–=~]{2,}/g,' ').replace(/\s{2,}/g,' ').trim();
+    if(totalRe.test(raw)){ if(total===null||cents>total) total=cents; return; }
+    amounts.push(cents);
+    if(skipRe.test(raw)||cents===0) return;
+    name=name.replace(/^\d+\s*[xX*]\s*/,q=>q.trim()+' ');   // keep "2x " quantity prefixes readable
+    if(!name||name.replace(/[^A-Za-zÀ-ÿ]/g,'').length<2) name='Item '+(items.length+1);
+    items.push({name, price:(cents/100).toFixed(2), use:true});
+  });
+  if(total===null&&amounts.length) total=Math.max(...amounts);
+  // an "item" equal to the total that also equals the sum of the others is the total misread as a line — drop it
+  const sum=items.reduce((s,i)=>s+CENT(i.price),0);
+  const suspect=items.length>2 && items.find(i=>CENT(i.price)===total && Math.abs(sum-2*total)<=3);
+  if(suspect) items=items.filter(i=>i!==suspect);
+  return {items,total,vendor};
+}
+function renderScanReview(){
+  const r=scanResult;
+  const rows=r.items.map((it,i)=>'<div class="scan-item">'
+    +'<input type="checkbox" '+(it.use?'checked':'')+' onchange="scanResult.items['+i+'].use=this.checked;scanTotals()">'
+    +'<input class="nm" value="'+esc(it.name)+'" oninput="scanResult.items['+i+'].name=this.value">'
+    +'<input class="pr" inputmode="decimal" value="'+esc(it.price)+'" oninput="scanResult.items['+i+'].price=this.value;scanTotals()"></div>').join('')
+    ||'<p class="muted">No priced lines found — you can still use the total below, or rescan with better light.</p>';
+  scanOverlay('<div class="o-head"><h2>📷 Check the scan</h2><button class="btn slim ghost-btn" onclick="closeScan()">Close</button></div>'
+    +'<div class="card">'
+    +'<label style="margin-top:0;">Vendor</label><input value="'+esc(r.vendor||'')+'" oninput="scanResult.vendor=this.value" placeholder="Not detected — type it">'
+    +'<label>Items found — fix names/prices, untick anything wrong</label>'+rows
+    +'<p class="muted small" id="scanSum" style="margin:6px 0 0;"></p>'
+    +'<label>Total on the bill ('+CUR()+')</label><input inputmode="decimal" value="'+(r.total!=null?(r.total/100).toFixed(2):'')+'" oninput="scanResult.total=CENT(this.value)" placeholder="Not detected — type it">'
+    +'<div style="display:flex;flex-direction:column;gap:8px;margin-top:14px;">'
+    +'<button class="btn" onclick="applyScan(\'items\')">Use items → drag &amp; drop who had what</button>'
+    +'<button class="btn secondary" onclick="applyScan(\'total\')">Just use the total</button>'
+    +'<button class="btn ghost-btn" onclick="document.getElementById(\'scanFile\').click()">↻ Rescan</button>'
+    +'</div></div>');
+  scanTotals();
+}
+function scanTotals(){
+  const el=document.getElementById('scanSum'); if(!el||!scanResult) return;
+  const s=scanResult.items.filter(i=>i.use).reduce((x,i)=>x+CENT(i.price),0);
+  el.textContent='Ticked items add up to '+money(s)
+    +(scanResult.total!=null?' · bill total '+money(scanResult.total)
+      +(s&&scanResult.total?(s===scanResult.total?' — matches ✓':' — difference goes to the leftover pool'):''):'');
+}
+function applyScan(kind){
+  const r=scanResult; if(!draft||!r){ closeScan(); return; }
+  if(r.vendor && !String(draft.vendor).trim()) draft.vendor=r.vendor;
+  if(r.total!=null && r.total>0) draft.total=(r.total/100).toFixed(2);
+  if(kind==='items'){
+    const inc=r.items.filter(i=>i.use&&CENT(i.price)>0);
+    draft.mode='itemized';
+    inc.forEach(i=>draft.items.push({id:uid(), name:i.name, price:i.price, assign:[]}));
+    if(!CENT(draft.total)){ const s=inc.reduce((x,i)=>x+CENT(i.price),0); if(s)draft.total=(s/100).toFixed(2); }
+  }
+  closeScan(); renderEditor();
+  toast(kind==='items'?'Items in — drag names onto them':'Total filled in');
 }
 
 /* ============ Live share link ============ */
