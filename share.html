@@ -53,6 +53,7 @@ h2{font-size:16px;margin:18px 4px 8px;}
 <div class="tricolore"></div>
 <main id="main"><div class="center">Loading balances…</div></main>
 
+<script src="config.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
@@ -154,6 +155,7 @@ function render(){
     +'<div class="big">'+money(trip)+'</div></div>'
     +'<div style="text-align:right;"><div class="muted small">still outstanding</div><div class="money" style="font-size:19px;font-family:var(--serif);color:'+(outstanding>0?'var(--red)':'var(--green)')+'">'+money(outstanding)+'</div></div></div>';
 
+  if(outstanding===0 && trip>0) h+='<div class="card" style="background:#E7F4EE;border-color:#bfe3d0;text-align:center;color:var(--green);font-weight:600;">🥂 Tout est réglé — everyone is fully settled up!</div>';
   h+='<h2>What each couple owes <span class="muted small">(tap for the breakdown)</span></h2>';
   units.forEach(u=>{
     const remaining=u.share-u.paidBack;
@@ -206,14 +208,17 @@ async function refresh(){
 (function init(){
   let payload=null;
   try{ payload=JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1))))); }catch(e){}
-  if(!payload||!payload.c||!payload.t){
+  const baked=window.LADDITION_CONFIG||{};
+  const cfg=(payload&&payload.c)||baked.firebase||null;
+  const trip=(payload&&payload.t)||baked.tripId||null;
+  weekId=(payload&&payload.w)||new URLSearchParams(location.search).get('week')||null;
+  if(!cfg||!trip){
     document.getElementById('main').innerHTML='<div class="err">This link is missing its trip details. Ask for a fresh share link from the app (Export → Live share link).</div>';
     return;
   }
-  weekId=payload.w||null;
   try{
-    firebase.initializeApp(payload.c);
-    docRef=firebase.firestore().collection('trips').doc(payload.t);
+    firebase.initializeApp(cfg);
+    docRef=firebase.firestore().collection('trips').doc(trip);
     docRef.onSnapshot(apply, ()=>{ document.getElementById('main').innerHTML='<div class="err">Couldn\'t reach the trip data. Check your connection and tap Refresh.</div>'; });
   }catch(e){
     document.getElementById('main').innerHTML='<div class="err">Couldn\'t connect to the database with this link.</div>';

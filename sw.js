@@ -1,5 +1,5 @@
-const CACHE = 'laddition-v5';
-const ASSETS = ['./','./index.html','./share.html','./manifest.json','./icon-180.png','./icon-512.png',
+const CACHE = 'laddition-v6';
+const ASSETS = ['./','./index.html','./share.html','./config.js','./manifest.json','./icon-180.png','./icon-512.png',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
   'https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js',

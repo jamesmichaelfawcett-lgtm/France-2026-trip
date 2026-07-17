@@ -224,6 +224,7 @@ input[type=range]{width:100%; accent-color:var(--blue); margin:8px 0 0; padding:
 </nav>
 <div class="toast" id="toast"></div>
 
+<script src="config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script>
@@ -274,6 +275,7 @@ function persist(){
   clearTimeout(saveT);
   const dot=document.getElementById('saveDot'); dot.textContent='saving…';
   saveT=setTimeout(async ()=>{
+    if(!applyingRemote){ lastLocalEdit=Date.now(); try{ localStorage.setItem('laddition-edited', String(lastLocalEdit)); }catch(e){} }
     const json=JSON.stringify(state);
     let ok=false;
     try{ await idbSet(json); ok=true; }catch(e){}
@@ -730,6 +732,7 @@ function renderBalances(){
     +'<div class="big-money">'+money(trip)+'</div></div>'
     +'<div style="text-align:right;"><div class="muted small">still outstanding</div><div style="font-size:19px;font-weight:600;font-family:var(--serif);color:'+(outstanding>0?'var(--red)':'var(--green)')+'">'+money(outstanding)+'</div></div></div>';
 
+  if(outstanding===0 && trip>0) html+='<div class="card" style="background:var(--green-soft);border-color:#bfe3d0;text-align:center;color:var(--green);font-weight:600;">🥂 Tout est réglé — everyone is fully settled up!</div>';
   html+='<h2 style="font-size:17px;margin:18px 4px 8px;">By couple <span class="muted small" style="font-weight:400;">tap to record payments</span></h2>';
   units.forEach(u=>{
     const remaining=u.share-u.paidBack;
@@ -1015,6 +1018,10 @@ function renderSetup(){
     +(fb.enabled
       ?'<button class="btn ghost-btn" style="margin-top:12px;" onclick="disconnectSync()">Turn off sync</button>'
       :'<button class="btn" style="margin-top:12px;" onclick="connectSync()">Connect &amp; sync</button>')
+    +(fb.enabled?'<button class="btn secondary" style="margin-top:8px;" onclick="downloadConfigJs()">⬇ Download config.js for your site</button>'
+      +'<p class="muted small" style="margin-top:6px;">'+(window.LADDITION_CONFIG
+        ?'✓ Your site has config.js — new devices and sessions connect automatically.'
+        :'Upload config.js to your repo and every device connects automatically — no more pasting.')+'</p>':'')
     +'<p class="muted small" style="margin-top:8px;">Anyone who has both your config and trip code can read and edit the trip — treat the code like a password. Everything still saves on-device even with sync off or no signal.</p></div>'
     +'<div class="card"><h2 style="color:var(--red)">Danger zone</h2>'
     +'<button class="btn danger" onclick="resetAll()">Erase everything &amp; start fresh</button>'
@@ -1046,8 +1053,14 @@ function resetAll(){ if(!confirm('Really erase ALL data?'))return; if(!confirm('
 /* ============ Cloud sync (Firebase Firestore, free plan) ============ */
 const FB_KEY='laddition-fb';
 let fb={config:null, tripId:'', enabled:false};
+const hadStoredFb=(function(){ try{ return !!localStorage.getItem(FB_KEY); }catch(e){ return false; } })();
 try{ Object.assign(fb, JSON.parse(localStorage.getItem(FB_KEY)||'{}')); }catch(e){}
+if(!hadStoredFb && window.LADDITION_CONFIG && LADDITION_CONFIG.firebase && LADDITION_CONFIG.tripId){
+  fb={config:LADDITION_CONFIG.firebase, tripId:LADDITION_CONFIG.tripId, enabled:true};
+  saveFb();
+}
 let db=null, unsubCloud=null, lastPushed='', applyingRemote=false;
+let lastLocalEdit=0; try{ lastLocalEdit=parseInt(localStorage.getItem('laddition-edited')||'0')||0; }catch(e){}
 const deviceId=(function(){ let d=null; try{ d=localStorage.getItem('laddition-dev'); if(!d){ d=uid(); localStorage.setItem('laddition-dev',d);} }catch(e){ d=uid(); } return d; })();
 
 function saveFb(){ try{ localStorage.setItem(FB_KEY, JSON.stringify(fb)); }catch(e){} }
@@ -1077,7 +1090,8 @@ async function startSync(){
       const d=snap.data();
       if(!d || !d.json){ lastPushed=''; pushCloud(); return; }   // brand-new trip code: seed it
       if(d.by===deviceId) return;                                 // our own write echoing back
-      if(d.json===JSON.stringify(state)) return;                  // nothing new
+      if(d.json===JSON.stringify(state)){ lastPushed=d.json; return; } // nothing new
+      if(d.updatedAt && lastLocalEdit>d.updatedAt){ lastPushed=''; pushCloud(); return; } // this device edited more recently (e.g. offline) — push, don't pull
       try{
         const s=JSON.parse(d.json);
         if(s && Array.isArray(s.people)){
@@ -1247,9 +1261,18 @@ function renderShareCard(){
     +'<p class="muted small" style="margin-top:8px;">The dashboard is view-only, but the link contains your trip code — only send it to people on the trip.</p>';
 }
 function makeShareLink(){
+  const baked=window.LADDITION_CONFIG && LADDITION_CONFIG.firebase && LADDITION_CONFIG.tripId===fb.tripId;
+  if(baked) return new URL('share.html'+(shareWeek?'?week='+encodeURIComponent(shareWeek):''), location.href).href;
   const payload={c:fb.config, t:fb.tripId, w:shareWeek||''};
   const b64=btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
   return new URL('share.html', location.href).href+'#'+b64;
+}
+function downloadConfigJs(){
+  if(!fb.config||!fb.tripId){ toast('Connect Cloud sync first'); return; }
+  const js="// L'Addition site configuration — upload next to index.html, then every device auto-connects.\n"
+    +'window.LADDITION_CONFIG = '+JSON.stringify({firebase:fb.config, tripId:fb.tripId},null,2)+';\n';
+  download('config.js', new Blob([js],{type:'text/javascript'}));
+  toast('Now upload config.js to your GitHub repo');
 }
 async function copyShareLink(){
   const url=makeShareLink();
