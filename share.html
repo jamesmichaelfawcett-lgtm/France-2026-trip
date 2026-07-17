@@ -115,8 +115,12 @@ function computeBalances(){
   state.people.forEach(p=>per[p.id].net=per[p.id].paid-per[p.id].owes);
   return {per,trip,count:exps.length};
 }
+function unitPayments(unitId){ return (state.payments||[]).filter(p=>p.unitId===unitId); }
+function paymentsTotal(unitId){ return unitPayments(unitId).reduce((s,p)=>s+CENT(p.amount),0); }
 function settleUp(per){
-  const units=allUnits().map(u=>({...u,net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0)}));
+  const units=allUnits().map(u=>({...u,net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0),paidBack:paymentsTotal(u.id)}));
+  const payerUnit=units.find(u=>u.members.includes(state.defaultPayer));
+  units.forEach(u=>{ if(u.paidBack&&payerUnit&&u!==payerUnit){ u.net+=u.paidBack; payerUnit.net-=u.paidBack; } });
   const debt=units.filter(u=>u.net<0).map(u=>({...u,amt:-u.net})).sort((a,b)=>b.amt-a.amt);
   const cred=units.filter(u=>u.net>0).map(u=>({...u,amt:u.net})).sort((a,b)=>b.amt-a.amt);
   const out=[]; let i=0,j=0;
@@ -143,21 +147,30 @@ function render(){
   document.getElementById('sub').textContent=(w?w.name:'Whole trip')+' · live balances · read-only';
   const {per,trip,count}=computeBalances();
   const payer=pname(state.defaultPayer);
-  const units=allUnits().map(u=>({...u,share:u.members.reduce((s,m)=>s+per[m].owes,0)})).filter(u=>u.share>0);
-  const maxShare=Math.max(1,...units.map(u=>u.share));
+  const isPayer=u=>u.members.includes(state.defaultPayer);
+  const units=allUnits().map(u=>({...u,share:u.members.reduce((s,m)=>s+per[m].owes,0),paidBack:paymentsTotal(u.id)})).filter(u=>u.share>0||u.paidBack>0);
+  const outstanding=units.reduce((s,u)=>s+(isPayer(u)?0:Math.max(0,u.share-u.paidBack)),0);
   let h='<div class="card spread"><div><div class="muted small">'+(w?esc(w.name):'Whole trip')+' · '+count+' expenses · all paid by '+esc(payer)+'</div>'
-    +'<div class="big">'+money(trip)+'</div></div></div>';
+    +'<div class="big">'+money(trip)+'</div></div>'
+    +'<div style="text-align:right;"><div class="muted small">still outstanding</div><div class="money" style="font-size:19px;font-family:var(--serif);color:'+(outstanding>0?'var(--red)':'var(--green)')+'">'+money(outstanding)+'</div></div></div>';
 
   h+='<h2>What each couple owes <span class="muted small">(tap for the breakdown)</span></h2>';
   units.forEach(u=>{
+    const remaining=u.share-u.paidBack;
+    const prog=u.share>0?Math.min(1,u.paidBack/u.share):0;
+    const status=isPayer(u)?'<span class="muted small">own share</span>'
+      :(remaining<=0&&u.share>0?'<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:#E7F4EE;color:var(--green);">PAID ✓</span>'
+      :'<span class="money" style="color:var(--red);">owes '+money(remaining)+'</span>');
     h+='<div class="card unit-card" style="--u:'+u.color+'" onclick="openUnit=openUnit===\''+u.id+'\'?null:\''+u.id+'\';render()">'
-      +'<div class="spread"><b>'+esc(u.label)+'</b><span class="money">'+money(u.share)+'</span></div>'
-      +'<div class="bar-wrap"><div class="bar" style="width:'+Math.round(u.share/maxShare*100)+'%"></div></div>';
+      +'<div class="spread"><div><b>'+esc(u.label)+'</b><div class="muted small">share '+money(u.share)+(u.paidBack?' · paid / credited '+money(u.paidBack):'')+'</div></div>'+status+'</div>'
+      +'<div class="bar-wrap"><div class="bar" style="width:'+Math.round(prog*100)+'%;'+(remaining<=0&&u.share>0?'background:var(--green);':'')+'"></div></div>';
     if(openUnit===u.id){
+      const pays=unitPayments(u.id);
       h+='<div class="detail">'+unitLines(u,per).map(l=>
         '<div class="li"><span>'+esc(l.e.vendor)+' <span class="muted">'+fmtDate(l.e.date)+'</span></span><span>'+money(l.c)+'</span></div>'
         +(l.e.notes&&l.e.notes.trim()?'<div class="note">'+esc(l.e.notes.trim())+'</div>':'')).join('')
-        +'<div class="li" style="border-top:1px solid var(--line);margin-top:4px;padding-top:6px;"><b>Total</b><b>'+money(u.share)+'</b></div></div>';
+        +pays.map(p=>'<div class="li" style="color:var(--green);"><span>'+(p.type==='credit'?'🏷️ Credit':'💶 Payment')+' '+fmtDate(p.date)+(p.note?' · '+esc(p.note):'')+'</span><span>−'+money(CENT(p.amount))+'</span></div>').join('')
+        +'<div class="li" style="border-top:1px solid var(--line);margin-top:4px;padding-top:6px;"><b>'+(isPayer(u)?'Total share':'Remaining')+'</b><b>'+money(isPayer(u)?u.share:Math.max(0,remaining))+'</b></div></div>';
     }
     h+='</div>';
   });
@@ -173,7 +186,7 @@ function render(){
   h+='</div>';
 
   const transfers=settleUp(per);
-  h+='<h2>Settle up</h2><div class="card">'+(transfers.length?transfers.map(t=>
+  h+='<h2>Still to settle</h2><div class="card">'+(transfers.length?transfers.map(t=>
     '<div class="settle-row"><span class="pip" style="background:'+t.color+'"></span><b>'+esc(t.from)+'</b><span class="arrow">→</span><b>'+esc(t.to)+'</b><span style="margin-left:auto;" class="money">'+money(t.amt)+'</span></div>').join('')
     :'<p class="muted" style="margin:4px;">All square 🥂</p>')+'</div>'
     +'<p class="muted small" style="text-align:center;">Updates live as '+esc(payer)+' adds expenses — or tap Refresh.</p>';

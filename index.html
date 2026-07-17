@@ -248,10 +248,15 @@ function seedState(){
       {id:'w1', name:'Week 1', participants:[P.James.id,P.Jenni.id,P.Holly.id,P.Jonny.id,P.Immy.id,P.Sam.id,P.Laura.id]},
       {id:'w2', name:'Week 2', participants:[P.James.id,P.Jenni.id,P.Chris.id,P.Bea.id,P.Josh.id,P.Alice.id]},
     ],
-    expenses:[]
+    expenses:[], payments:[], defaultWeek:'w1'
   };
 }
 let state = seedState();
+function migrate(s){
+  s.payments=s.payments||[];
+  if(!s.defaultWeek || !s.weeks.some(w=>w.id===s.defaultWeek)) s.defaultWeek=s.weeks[0]?s.weeks[0].id:'';
+  return s;
+}
 
 /* ============ Storage: IndexedDB with localStorage fallback ============ */
 const DB_KEY='laddition-state';
@@ -281,7 +286,7 @@ async function loadState(){
   let json=null;
   try{ json=await idbGet(); }catch(e){}
   if(!json){ try{ json=localStorage.getItem(DB_KEY); }catch(e){} }
-  if(json){ try{ const s=JSON.parse(json); if(s && s.people) state=s; }catch(e){} }
+  if(json){ try{ const s=JSON.parse(json); if(s && s.people) state=migrate(s); }catch(e){} }
 }
 
 /* ============ Helpers ============ */
@@ -379,9 +384,17 @@ function computeBalances(weekFilter){
   state.people.forEach(p=>per[p.id].net=per[p.id].paid-per[p.id].owes);
   return {per,trip,count:exps.length};
 }
+function unitPayments(unitId){ return (state.payments||[]).filter(p=>p.unitId===unitId); }
+function paymentsTotal(unitId){ return unitPayments(unitId).reduce((s,p)=>s+CENT(p.amount),0); }
+function adjustedNets(per){
+  const units=allUnits().map(u=>({...u, net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0), paidBack:paymentsTotal(u.id)}));
+  const payerUnit=units.find(u=>u.members.includes(state.defaultPayer));
+  units.forEach(u=>{ if(u.paidBack && payerUnit && u!==payerUnit){ u.net+=u.paidBack; payerUnit.net-=u.paidBack; } });
+  return units;
+}
 function settleUp(per){
-  // aggregate by unit, then greedy min-transfers
-  const units=allUnits().map(u=>({...u, net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0)}));
+  // aggregate by unit (payments & credits applied), then greedy min-transfers
+  const units=adjustedNets(per);
   const debt=units.filter(u=>u.net<-0).map(u=>({...u,amt:-u.net})).sort((a,b)=>b.amt-a.amt);
   const cred=units.filter(u=>u.net>0).map(u=>({...u,amt:u.net})).sort((a,b)=>b.amt-a.amt);
   const out=[]; let i=0,j=0;
@@ -446,10 +459,11 @@ let draft=null, selectedItem=null;
 
 function openEditor(id){
   const existing=id?state.expenses.find(e=>e.id===id):null;
+  const dw=state.weeks.find(w=>w.id===state.defaultWeek)||state.weeks[0];
   draft = existing ? JSON.parse(JSON.stringify(existing)) : {
-    id:uid(), vendor:'', date:todayISO(), weekId:'w1', category:'food',
+    id:uid(), vendor:'', date:todayISO(), weekId:dw?dw.id:'', category:'food',
     payerId:state.defaultPayer, total:'', mode:'person',
-    participants:[...(state.weeks[0]?.participants||state.people.map(p=>p.id))],
+    participants:[...(dw?dw.participants:state.people.map(p=>p.id))],
     items:[], remainderMode:'person', custom:{}, pct:{}, notes:''
   };
   draft._isNew=!existing;
@@ -700,29 +714,48 @@ function deleteExpense(){
 }
 
 /* ============ Balances ============ */
-let balWeek=null, openPerson=null;
+let balWeek=null, openPerson=null, openUnit=null;
 function renderBalances(){
   const seg=document.getElementById('balWeekSeg');
   seg.innerHTML='<button class="'+(balWeek===null?'on':'')+'" onclick="balWeek=null;renderBalances()">Whole trip</button>'
     +state.weeks.map(w=>'<button class="'+(balWeek===w.id?'on':'')+'" onclick="balWeek=\''+w.id+'\';renderBalances()">'+esc(w.name)+'</button>').join('');
   const {per,trip,count}=computeBalances(balWeek);
   const payer=pname(state.defaultPayer);
+  const isPayer=u=>u.members.includes(state.defaultPayer);
   const units=allUnits().map(u=>({...u,
     share:u.members.reduce((s,m)=>s+per[m].owes,0),
-    net:u.members.reduce((s,m)=>s+per[m].net,0)})).filter(u=>u.share>0||u.net!==0);
-  const maxShare=Math.max(1,...units.map(u=>u.share));
-  let html='<div class="card spread"><div><div class="muted small">'+(balWeek?esc(state.weeks.find(w=>w.id===balWeek).name):'Whole trip')+' · '+count+' expenses</div>'
-    +'<div class="big-money">'+money(trip)+'</div></div><div class="muted small" style="text-align:right;">paid by<br><b>'+esc(payer)+'</b></div></div>';
+    paidBack:paymentsTotal(u.id)})).filter(u=>u.share>0||u.paidBack>0);
+  const outstanding=units.reduce((s,u)=>s+(isPayer(u)?0:Math.max(0,u.share-u.paidBack)),0);
+  let html='<div class="card spread"><div><div class="muted small">'+(balWeek?esc(state.weeks.find(w=>w.id===balWeek).name):'Whole trip')+' · '+count+' expenses · paid by '+esc(payer)+'</div>'
+    +'<div class="big-money">'+money(trip)+'</div></div>'
+    +'<div style="text-align:right;"><div class="muted small">still outstanding</div><div style="font-size:19px;font-weight:600;font-family:var(--serif);color:'+(outstanding>0?'var(--red)':'var(--green)')+'">'+money(outstanding)+'</div></div></div>';
 
-  html+='<h2 style="font-size:17px;margin:18px 4px 8px;">By couple</h2>';
+  html+='<h2 style="font-size:17px;margin:18px 4px 8px;">By couple <span class="muted small" style="font-weight:400;">tap to record payments</span></h2>';
   units.forEach(u=>{
-    const owes=-u.net;
-    html+='<div class="card unit-card" style="--u:'+u.color+'"><div class="spread"><div><b>'+esc(u.label)+'</b>'
-      +'<div class="muted small">share '+money(u.share)+'</div></div>'
-      +'<div style="text-align:right;">'+(owes>0?'<span class="neg" style="font-weight:600;">owes '+money(owes)+'</span>'
-        :owes<0?'<span class="pos" style="font-weight:600;">is owed '+money(-owes)+'</span>'
-        :'<span class="pill ok">settled</span>')+'</div></div>'
-      +'<div class="bar-wrap"><div class="bar" style="width:'+Math.round(u.share/maxShare*100)+'%"></div></div></div>';
+    const remaining=u.share-u.paidBack;
+    const prog=u.share>0?Math.min(1,u.paidBack/u.share):0;
+    const status=isPayer(u)
+      ? '<span class="muted small">your own share</span>'
+      : (remaining<=0&&u.share>0 ? '<span class="pill ok">PAID ✓</span>'
+        : '<span class="neg" style="font-weight:600;">owes '+money(remaining)+'</span>');
+    html+='<div class="card unit-card" style="--u:'+u.color+'" onclick="openUnit=openUnit===\''+u.id+'\'?null:\''+u.id+'\';renderBalances()">'
+      +'<div class="spread"><div><b>'+esc(u.label)+'</b>'
+      +'<div class="muted small">share '+money(u.share)+(u.paidBack?' · paid / credited '+money(u.paidBack):'')+'</div></div>'
+      +'<div style="text-align:right;">'+status+'</div></div>'
+      +'<div class="bar-wrap"><div class="bar" style="width:'+Math.round(prog*100)+'%;'+(remaining<=0&&u.share>0?'background:var(--green);':'')+'"></div></div>';
+    if(openUnit===u.id && !isPayer(u)){
+      const pays=unitPayments(u.id);
+      html+='<div class="detail" onclick="event.stopPropagation()">'
+        +(pays.length?pays.map(p=>'<div><span>'+(p.type==='credit'?'🏷️':'💶')+' '+fmtDate(p.date)+(p.note?' · '+esc(p.note):'')+'</span>'
+          +'<span>'+money(CENT(p.amount))+' <button class="remove-item" style="font-size:14px;" onclick="deletePay(\''+p.id+'\')">✕</button></span></div>').join('')
+          :'<div class="muted">No payments or credits yet</div>')
+        +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">'
+        +'<button class="btn secondary slim" onclick="openPayForm(\''+u.id+'\',\'payment\')">+ Payment</button>'
+        +'<button class="btn secondary slim" onclick="openPayForm(\''+u.id+'\',\'credit\')">+ Credit</button>'
+        +(remaining>0?'<button class="btn slim" onclick="markPaid(\''+u.id+'\')">✓ Mark fully paid</button>':'')
+        +'</div></div>';
+    }
+    html+='</div>';
   });
 
   html+='<h2 style="font-size:17px;margin:18px 4px 8px;">By person</h2><div class="card">';
@@ -745,6 +778,49 @@ function renderBalances(){
   document.getElementById('balBody').innerHTML=html;
 }
 
+/* ============ Payments & credits ============ */
+let payDraft=null;
+function openPayForm(unitId,type){
+  payDraft={id:uid(), unitId, type:type||'payment', amount:'', date:todayISO(), note:''};
+  renderPayForm();
+}
+function renderPayForm(){
+  const units=allUnits().filter(u=>!u.members.includes(state.defaultPayer));
+  const opts=units.map(u=>'<option value="'+u.id+'" '+(payDraft.unitId===u.id?'selected':'')+'>'+esc(u.label)+'</option>').join('');
+  scanOverlay('<div class="o-head"><h2>'+(payDraft.type==='payment'?'💶 Record a payment':'🏷️ Add a credit')+'</h2>'
+    +'<button class="btn slim ghost-btn" onclick="closeScan()">Cancel</button></div>'
+    +'<div class="card">'
+    +'<div class="seg"><button class="'+(payDraft.type==='payment'?'on':'')+'" onclick="payDraft.type=\'payment\';renderPayForm()">Payment received</button>'
+    +'<button class="'+(payDraft.type==='credit'?'on':'')+'" onclick="payDraft.type=\'credit\';renderPayForm()">They covered something</button></div>'
+    +'<p class="muted small" style="margin:10px 2px 0;">'+(payDraft.type==='payment'
+      ?'They\'ve sent '+esc(pname(state.defaultPayer))+' money — comes straight off what they owe.'
+      :'They paid for something on '+esc(pname(state.defaultPayer))+'\'s behalf (e.g. covered your lunch) — knocked off their owing total.')+'</p>'
+    +'<label>From</label><select onchange="payDraft.unitId=this.value">'+opts+'</select>'
+    +'<label>Amount ('+CUR()+')</label><input inputmode="decimal" value="'+esc(payDraft.amount)+'" oninput="payDraft.amount=this.value" placeholder="0.00">'
+    +'<label>Date</label><input type="date" value="'+esc(payDraft.date)+'" oninput="payDraft.date=this.value">'
+    +'<label>Note</label><input value="'+esc(payDraft.note)+'" oninput="payDraft.note=this.value" placeholder="'+(payDraft.type==='credit'?'e.g. They paid for lunch in Nice':'e.g. Bank transfer')+'">'
+    +'<button class="btn" style="margin-top:14px;" onclick="savePay()">Save</button></div>');
+}
+function savePay(){
+  if(CENT(payDraft.amount)<=0){ toast('Add an amount'); return; }
+  state.payments.push({...payDraft});
+  persist(); closeScan(); renderBalances();
+  toast(payDraft.type==='payment'?'Payment recorded':'Credit added');
+}
+function deletePay(pid){
+  if(!confirm('Remove this entry?')) return;
+  state.payments=state.payments.filter(p=>p.id!==pid);
+  persist(); renderBalances();
+}
+function markPaid(unitId){
+  const {per}=computeBalances(null);
+  const u=allUnits().find(x=>x.id===unitId); if(!u) return;
+  const remaining=u.members.reduce((s,m)=>s+per[m].owes,0)-paymentsTotal(unitId);
+  if(remaining<=0){ toast('Nothing outstanding'); return; }
+  state.payments.push({id:uid(), unitId, type:'payment', amount:(remaining/100).toFixed(2), date:todayISO(), note:'Marked as fully paid'});
+  persist(); renderBalances(); toast(u.label+' settled ✓');
+}
+
 /* ============ Exports ============ */
 function download(name, blob){
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
@@ -764,6 +840,14 @@ function exportCSV(){
   });
   const {per,trip}=computeBalances(null);
   rows.push([]); rows.push(['TOTALS','','','','','','',(trip/100).toFixed(2),...ppl.map(p=>(per[p.id].owes/100).toFixed(2))]);
+  if((state.payments||[]).length){
+    const uall=allUnits();
+    rows.push([]); rows.push(['PAYMENTS & CREDITS']); rows.push(['Date','From','Type','Amount','Note']);
+    [...state.payments].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(p=>{
+      const u=uall.find(x=>x.id===p.unitId);
+      rows.push([p.date, u?u.label:'?', p.type, (CENT(p.amount)/100).toFixed(2), p.note||'']);
+    });
+  }
   const csv=rows.map(r=>r.map(c=>'"'+String(c??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
   download('france-2026-expenses-'+stamp()+'.csv', new Blob(['\ufeff'+csv],{type:'text/csv'}));
   toast('CSV downloaded');
@@ -780,7 +864,7 @@ function importBackup(input){
       const s=JSON.parse(r.result);
       if(!s||!Array.isArray(s.people)||!Array.isArray(s.expenses)) throw 0;
       if(!confirm('Replace everything in the app with this backup ('+s.expenses.length+' expenses)?')) return;
-      state=s; persist(); renderExpenses(); toast('Backup restored'); showView('expenses');
+      state=migrate(s); persist(); renderExpenses(); toast('Backup restored'); showView('expenses');
     }catch(e){ toast('That file is not a valid backup'); } };
   r.readAsText(f); input.value='';
 }
@@ -808,13 +892,22 @@ function exportPDF(){
   doc.text('Everything was paid by '+payer+'. Shares below show what each person or couple owes against that total,', 14, 49);
   doc.text('including '+payer+"'s own share — the whole table adds up to the grand balance.", 14, 53.5);
 
-  // Owed by couple
-  doc.autoTable({ startY:58, head:[['Couple / traveller','Members','Owes']],
-    body: units.map(u=>{ const share=u.members.reduce((s,m)=>s+per[m].owes,0);
-      return [u.label, u.members.map(pname).join(', '), EUR(share)]; }),
-    foot:[['','Grand balance ('+payer+')', EUR(trip)]],
+  // Owed by couple, with payments/credits netted off
+  const isPayerU=u=>u.members.includes(state.defaultPayer);
+  let totPaid=0, totRemain=0;
+  const coupleRows=units.map(u=>{
+    const share=u.members.reduce((s,m)=>s+per[m].owes,0);
+    const paid=paymentsTotal(u.id);
+    const remain=share-paid;
+    if(!isPayerU(u)){ totPaid+=paid; totRemain+=Math.max(0,remain); }
+    return [u.label, u.members.map(pname).join(', '), EUR(share), paid?EUR(paid):'—',
+      isPayerU(u)?'own share':(remain<=0&&share>0?'PAID':EUR(remain))];
+  });
+  doc.autoTable({ startY:58, head:[['Couple / traveller','Members','Share','Paid / credits','Remaining']],
+    body: coupleRows,
+    foot:[['','Grand balance ('+payer+')', EUR(trip), EUR(totPaid), EUR(totRemain)+' outstanding']],
     footStyles:{fillColor:[240,238,228], textColor:navy, fontStyle:'bold'},
-    headStyles:{fillColor:navy}, styles:{fontSize:9}, theme:'striped' });
+    headStyles:{fillColor:navy}, styles:{fontSize:8.5}, theme:'striped' });
 
   // Owed by person
   doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Person','Individual share']],
@@ -826,8 +919,15 @@ function exportPDF(){
   // Settle up (the background truth: transfers to the payer)
   const transfers=settleUp(per);
   if(transfers.length){
-    doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Settle up — who pays','To','Amount']],
+    doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Still to settle — who pays','To','Amount']],
       body:transfers.map(t=>[t.from,t.to,EUR(t.amt)]), headStyles:{fillColor:red}, styles:{fontSize:9} });
+  }
+  if((state.payments||[]).length){
+    const uLabel=id=>{ const u=units.find(x=>x.id===id); return u?u.label:'?'; };
+    doc.autoTable({ startY:doc.lastAutoTable.finalY+8, head:[['Payments & credits — date','From','Type','Amount','Note']],
+      body:[...state.payments].sort((a,b)=>(a.date||'').localeCompare(b.date||''))
+        .map(p=>[fmtDate(p.date), uLabel(p.unitId), p.type==='credit'?'credit':'payment', EUR(CENT(p.amount)), p.note||'']),
+      headStyles:{fillColor:[46,125,91]}, styles:{fontSize:8.5}, theme:'striped' });
   }
 
   // Expense register (with notes as indented sub-rows)
@@ -902,6 +1002,8 @@ function renderSetup(){
       +'<button class="btn slim secondary" onclick="makeCouple()">Pair</button></div>':'')+'</div>'
     +'<div class="card"><h2>Weeks</h2>'+weeksHtml+'</div>'
     +'<div class="card"><h2>Preferences</h2><label>Default payer</label><select onchange="state.defaultPayer=this.value;persist()">'+payerOpts+'</select>'
+    +'<label>Default week for new expenses</label><select onchange="state.defaultWeek=this.value;persist()">'
+    +state.weeks.map(w=>'<option value="'+w.id+'" '+(state.defaultWeek===w.id?'selected':'')+'>'+esc(w.name)+'</option>').join('')+'</select>'
     +'<label>Currency symbol</label><input value="'+esc(CUR())+'" maxlength="3" oninput="state.currency=this.value||\'€\';persist()"></div>'
     +'<div class="card"><h2>Cloud sync</h2>'
     +'<p class="muted small">Sync this trip to Firebase (free) so every device with your trip code sees the same data, live. '
@@ -979,7 +1081,7 @@ async function startSync(){
       try{
         const s=JSON.parse(d.json);
         if(s && Array.isArray(s.people)){
-          applyingRemote=true; state=s; persist(); applyingRemote=false;
+          applyingRemote=true; state=migrate(s); persist(); applyingRemote=false;
           rerenderCurrent(); setCloud('☁ synced');
         }
       }catch(e){}
