@@ -118,10 +118,12 @@ function computeBalances(){
 }
 function unitPayments(unitId){ return (state.payments||[]).filter(p=>p.unitId===unitId); }
 function paymentsTotal(unitId){ return unitPayments(unitId).reduce((s,p)=>s+CENT(p.amount),0); }
-function settleUp(per){
+function settleUp(per, capToDebt){
   const units=allUnits().map(u=>({...u,net:u.members.reduce((s,m)=>s+(per[m]?per[m].net:0),0),paidBack:paymentsTotal(u.id)}));
   const payerUnit=units.find(u=>u.members.includes(state.defaultPayer));
-  units.forEach(u=>{ if(u.paidBack&&payerUnit&&u!==payerUnit){ u.net+=u.paidBack; payerUnit.net-=u.paidBack; } });
+  units.forEach(u=>{ if(u.paidBack&&payerUnit&&u!==payerUnit){
+    const apply=capToDebt ? Math.min(u.paidBack, Math.max(0,-u.net)) : u.paidBack;
+    if(apply){ u.net+=apply; payerUnit.net-=apply; } } });
   const debt=units.filter(u=>u.net<0).map(u=>({...u,amt:-u.net})).sort((a,b)=>b.amt-a.amt);
   const cred=units.filter(u=>u.net>0).map(u=>({...u,amt:u.net})).sort((a,b)=>b.amt-a.amt);
   const out=[]; let i=0,j=0;
@@ -149,7 +151,7 @@ function render(){
   const {per,trip,count}=computeBalances();
   const payer=pname(state.defaultPayer);
   const isPayer=u=>u.members.includes(state.defaultPayer);
-  const units=allUnits().map(u=>({...u,share:u.members.reduce((s,m)=>s+per[m].owes,0),paidBack:paymentsTotal(u.id)})).filter(u=>u.share>0||u.paidBack>0);
+  const units=allUnits().map(u=>({...u,share:u.members.reduce((s,m)=>s+per[m].owes,0),paidBack:paymentsTotal(u.id)})).filter(u=> weekId ? u.share>0 : (u.share>0||u.paidBack>0));
   const outstanding=units.reduce((s,u)=>s+(isPayer(u)?0:Math.max(0,u.share-u.paidBack)),0);
   let h='<div class="card spread"><div><div class="muted small">'+(w?esc(w.name):'Whole trip')+' · '+count+' expenses · all paid by '+esc(payer)+'</div>'
     +'<div class="big">'+money(trip)+'</div></div>'
@@ -187,7 +189,7 @@ function render(){
   });
   h+='</div>';
 
-  const transfers=settleUp(per);
+  const transfers=settleUp(per, !!weekId);
   h+='<h2>Still to settle</h2><div class="card">'+(transfers.length?transfers.map(t=>
     '<div class="settle-row"><span class="pip" style="background:'+t.color+'"></span><b>'+esc(t.from)+'</b><span class="arrow">→</span><b>'+esc(t.to)+'</b><span style="margin-left:auto;" class="money">'+money(t.amt)+'</span></div>').join('')
     :'<p class="muted" style="margin:4px;">All square 🥂</p>')+'</div>'

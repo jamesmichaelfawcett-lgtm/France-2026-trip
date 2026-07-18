@@ -1,4 +1,4 @@
-const CACHE = 'laddition-v6';
+const CACHE = 'laddition-v7';
 const ASSETS = ['./','./index.html','./share.html','./config.js','./manifest.json','./icon-180.png','./icon-512.png',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
